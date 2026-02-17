@@ -1,0 +1,15 @@
+# OS
+.DS_Store
+
+# 環境・キャッシュ
+.venv/
+__pycache__/
+*.pyc
+
+# 秘密情報（GitHubに上げない）
+api_key.txt
+.env
+
+# データ（ログ・出力は含めない）
+data/
+debug/

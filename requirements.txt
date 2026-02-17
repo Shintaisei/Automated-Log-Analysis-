@@ -1,0 +1,5 @@
+# 標準
+# 検索ワード候補生成（suggest_keywords.py）用
+openai>=1.0.0
+# 最終整形・Excel集約（consolidate_output_to_excel.py）用
+openpyxl>=3.0.0

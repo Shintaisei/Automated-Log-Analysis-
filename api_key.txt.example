@@ -1,0 +1,4 @@
+ここにOpenAI APIキーを1行で貼り付けて保存し、このファイルを api_key.txt にリネームしてください。
+例: sk-proj-xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx
+
+※ api_key.txt は .gitignore に追加することを推奨します（リポジトリにコミットしない）。
