@@ -1,6 +1,6 @@
 攻撃コマンドをdata/input/攻撃レポート.txtに直張り
 python suggest_keywords.py -o T1615_Atomic4
-
+python consolidate_output_to_excel.py
 
 
 

@@ -13,3 +13,6 @@ api_key.txt
 # データ（ログ・出力は含めない）
 data/
 debug/
+
+# CSV（全般）
+*.csv

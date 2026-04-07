@@ -112,9 +112,9 @@ def main() -> int:
 
         print(f"\n[検索ワード: {keyword}]")
         if run_cmd(base_dir, "抽出", [
-            sys.executable, str(scripts_dir / "extract_logs.py"), keyword,
+            sys.executable, str(scripts_dir / "extract_logs.py"),
             "-i", str(preprocessed), "-o", str(extracted),
-        ] + case_flag) != 0:
+        ] + case_flag + ["--", keyword]) != 0:
             print(f"エラー: 抽出で失敗 (keyword={keyword})", file=sys.stderr)
             return 1
         if run_cmd(base_dir, "追跡", [

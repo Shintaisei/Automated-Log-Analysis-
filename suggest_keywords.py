@@ -18,19 +18,37 @@ from typing import Optional
 CONFIG_PATH = "config.json"
 DEFAULT_NUM_KEYWORDS = 5
 
+# 概算コスト用（USD per 1M tokens）。モデル追加時はここを更新
+MODEL_PRICE_PER_1M = {
+    "gpt-5.2": (2.50, 10.00),
+    "gpt-4o": (2.50, 10.00),
+    "gpt-4o-mini": (0.15, 0.60),
+    "gpt-4-turbo": (10.00, 30.00),
+}
+
+
+def estimate_cost(prompt_tokens: int, completion_tokens: int, model: str) -> float:
+    """入力・出力トークンから概算コスト（USD）を算出。"""
+    price = MODEL_PRICE_PER_1M.get(model) or MODEL_PRICE_PER_1M.get("gpt-5.2", (2.50, 10.00))
+    input_1m, output_1m = price
+    return (prompt_tokens / 1_000_000 * input_1m) + (completion_tokens / 1_000_000 * output_1m)
+
 
 def load_config(base_dir: Path) -> dict:
     """config.json を読む。無ければデフォルトのみ返す。"""
     path = base_dir / CONFIG_PATH
+    out = {"num_keywords": DEFAULT_NUM_KEYWORDS, "input_csv": "data/input/T1615_add.csv"}
     if not path.exists():
-        return {"num_keywords": DEFAULT_NUM_KEYWORDS}
+        return out
     try:
         data = json.loads(path.read_text(encoding="utf-8"))
         n = data.get("num_keywords", DEFAULT_NUM_KEYWORDS)
-        n = max(1, min(20, int(n)))  # 1〜20にクランプ
-        return {"num_keywords": n}
+        out["num_keywords"] = max(1, min(20, int(n)))
+        if "input_csv" in data and data["input_csv"]:
+            out["input_csv"] = data["input_csv"].strip()
     except Exception:
-        return {"num_keywords": DEFAULT_NUM_KEYWORDS}
+        pass
+    return out
 
 
 # APIキー取得: 環境変数 → api_key.txt
@@ -59,10 +77,13 @@ def build_prompt(text: str, num_keywords: int) -> str:
 
 【方針】
 - **コマンド起点**: レポート内のコマンドライン・PowerShell・スクリプト実行をまず洗い出す
-- **コマンドの一部を最優先**: ログの CommandLine/Details に含まれやすい「コマンドの一部」を検索ワードにする
-  - 例: 実行ファイル名（gpresult.exe, curl, powershell）、コマレット名（Get-DomainGPO, DownloadString）、
-    スクリプト名（powerview.ps1）、引数やメソッド名（Net.WebClient, IEX）、パスの一部
-- **複数パターン**: 同じコマンドから複数の候補を出す（例: フルコマンドの特徴部分、実行体名のみ、メソッド名のみ）
+- **短い語を最優先（重要）**: ログに「含まれそうな」内容は、**長い一致文字列ではなく短いトークン**で検索する
+  - 長いコマンド行・長いパス・長いBase64断片をそのまま1語にしない
+  - 代わりに、その中に含まれる**最小の特徴的な語**に落とす（例: 実行体名のみ、コマレット1語、メソッド名、スイッチ1つ、スクリプトのファイル名のみ）
+- **長さの目安**: 原則として各ワードは **3〜40文字程度**、単語・短いフレーズに留める（スペース区切りでも2〜3語まで）
+- **具体例（良い）**: gpresult.exe, Invoke-WebRequest, DownloadString, -EncodedCommand, schtasks, mshta
+- **具体例（避ける）**: コマンド全体のコピー、数十文字を超える1連の文字列、フルパス全体
+- **複数パターン**: 同じ攻撃から「実行体名」「コマレット」「メソッド名」など、**別々の短い切り口**で{n}つ出す
 - 英語のまま・短く具体的に。1行1つ。先頭に番号や記号は付けない
 - 必ず{n}つ、1行に1つで出力する
 
@@ -71,7 +92,7 @@ def build_prompt(text: str, num_keywords: int) -> str:
 {text}
 ---
 
-上記の方針に従い、**コマンドの一部を優先した**検索ワードを{n}つ、1行1つで出力してください。"""
+上記の方針に従い、**短くログに含まれやすい検索ワード**を{n}つ、1行1つで出力してください。"""
 
 
 REPORT_SYSTEM = """あなたはWindowsイベントログ解析と攻撃検知の専門家です。
@@ -134,8 +155,8 @@ def generate_report(
     attack_text: str,
     client,  # OpenAI
     model: str,
-) -> Optional[str]:
-    """各ワードのヒット数を集計し、AIで妥当性判定レポートを生成して保存。戻り値は保存パスまたはNone。"""
+) -> tuple[Optional[str], dict]:
+    """各ワードのヒット数を集計し、AIで妥当性判定レポートを生成して保存。戻り値は (保存パスまたはNone, トークン使用量)。"""
     out_dir = base_dir / "data" / "output" / output_stem
     keyword_results = []
     for kw in keywords:
@@ -152,6 +173,7 @@ def generate_report(
         keyword_results.append((kw, count))
 
     prompt = build_report_prompt(attack_text, keyword_results)
+    usage = {"prompt_tokens": 0, "completion_tokens": 0}
     try:
         resp = client.chat.completions.create(
             model=model,
@@ -162,9 +184,12 @@ def generate_report(
             temperature=0.2,
         )
         content = (resp.choices[0].message.content or "").strip()
+        if getattr(resp, "usage", None):
+            usage["prompt_tokens"] = getattr(resp.usage, "prompt_tokens", 0) or 0
+            usage["completion_tokens"] = getattr(resp.usage, "completion_tokens", 0) or 0
     except Exception as e:
         print(f"レポート生成でAPIエラー: {e}", file=sys.stderr)
-        return None
+        return None, usage
 
     report_path = out_dir / "レポート.md"
     try:
@@ -172,20 +197,27 @@ def generate_report(
         report_path.write_text(content, encoding="utf-8")
     except Exception as e:
         print(f"レポート保存エラー: {e}", file=sys.stderr)
-        return None
-    return str(report_path)
+        return None, usage
+    return str(report_path), usage
 
 
 def main() -> int:
     base_dir = Path(__file__).resolve().parent
+    config = load_config(base_dir)
     ap = argparse.ArgumentParser(
-        description="攻撃レポートから検索ワードを生成しパイプラインを実行。候補数は config.json の num_keywords で指定。"
+        description="攻撃レポートから検索ワードを生成しパイプラインを実行。候補数・入力CSVは config.json で指定可能。"
+    )
+    ap.add_argument(
+        "-i", "--input-csv",
+        default=config["input_csv"],
+        metavar="CSV",
+        help="入力ログCSV（デフォルト: config.json の input_csv または data/input/T1615_add.csv）",
     )
     ap.add_argument(
         "-o", "--output-name",
-        required=True,
+        default=None,
         metavar="NAME",
-        help="出力TSVのベース名（必須）。例: T1615_Atomic2 → data/output/T1615_Atomic2_<ワード>_出力想定形式.tsv ができる",
+        help="出力フォルダ名（省略時は入力CSVのファイル名。例: -i T1572_add.csv → data/output/T1572_add/）",
     )
     ap.add_argument(
         "report",
@@ -194,13 +226,8 @@ def main() -> int:
         help=argparse.SUPPRESS,
     )
     ap.add_argument(
-        "-i", "--input-csv",
-        default="data/input/T1615_add.csv",
-        help=argparse.SUPPRESS,
-    )
-    ap.add_argument(
         "--model",
-        default="gpt-4o",
+        default="gpt-5.2",
         help=argparse.SUPPRESS,
     )
     ap.add_argument(
@@ -209,9 +236,10 @@ def main() -> int:
         help=argparse.SUPPRESS,
     )
     args = ap.parse_args()
-    args.run = True  # -o 指定時は常に実行
+    args.run = True  # 実行モード
+    if args.output_name is None:
+        args.output_name = Path(args.input_csv).stem
 
-    config = load_config(base_dir)
     num_keywords = config["num_keywords"]
 
     report_path = Path(args.report)
@@ -250,17 +278,23 @@ def main() -> int:
     client = OpenAI(api_key=api_key)
     prompt = build_prompt(text[:8000], num_keywords)  # 長いレポートは先頭のみ
 
+    total_prompt = 0
+    total_completion = 0
+
     print(f"検索ワード候補を生成中（候補数: {num_keywords}）...", file=sys.stderr)
     try:
         resp = client.chat.completions.create(
             model=args.model,
             messages=[
-                {"role": "system", "content": f"あなたはWindowsイベントログ解析の専門家です。攻撃レポート内の実行コマンドを起点に、複数パターンの検索ワードを考えます。特にコマンドの一部（実行体名・コマレット・メソッド名・スクリプト名など）をログ検索ワードとして優先し、{num_keywords}つを1行1つで出力します。"},
+                {"role": "system", "content": f"あなたはWindowsイベントログ解析の専門家です。攻撃レポート内の実行コマンドを起点に検索ワードを考えます。長いコマンド断片やフルパスは避け、ログに含まれるであろう内容は**短いトークン**（実行体名・コマレット1語・メソッド名など）に分解して優先する。各ワードは短く（目安3〜40文字、2〜3語まで）、{num_keywords}つを1行1つで出力する。"},
                 {"role": "user", "content": prompt},
             ],
             temperature=0.3,
         )
         content = (resp.choices[0].message.content or "").strip()
+        if getattr(resp, "usage", None):
+            total_prompt += getattr(resp.usage, "prompt_tokens", 0) or 0
+            total_completion += getattr(resp.usage, "completion_tokens", 0) or 0
     except Exception as e:
         print(f"APIエラー: {e}", file=sys.stderr)
         return 1
@@ -291,12 +325,15 @@ def main() -> int:
         k = k.replace("\\", "\\\\").replace('"', '\\"')
         escaped.append(f'"{k}"')
 
-    run_args = ["python", "run_pipeline.py"] + keywords + ["-i", args.input_csv]
+    # オプションを先に、キーワードは -- の後に渡す（-UseBasicParsing 等がオプションと解釈されないように）
+    run_args = ["python", "run_pipeline.py", "-i", args.input_csv]
     if args.output_name:
         run_args += ["-O", args.output_name]
-    cmd = f"python run_pipeline.py {' '.join(escaped)} -i {args.input_csv}"
+    run_args += ["--"] + keywords
+    cmd = f"python run_pipeline.py -i {args.input_csv}"
     if args.output_name:
         cmd += f" -O {args.output_name}"
+    cmd += " -- " + " ".join(escaped)
     print(cmd)
 
     if args.run:
@@ -306,11 +343,19 @@ def main() -> int:
             return r.returncode
         # パイプライン成功後、検索ワードごとの妥当性を判定してレポート化
         print("妥当性レポートを生成中...", file=sys.stderr)
-        report_file = generate_report(
+        report_file, report_usage = generate_report(
             base_dir, args.output_name, keywords, text, client, args.model
         )
         if report_file:
             print(f"レポート保存: {report_file}", file=sys.stderr)
+        total_prompt += report_usage.get("prompt_tokens", 0)
+        total_completion += report_usage.get("completion_tokens", 0)
+
+        cost_usd = estimate_cost(total_prompt, total_completion, args.model)
+        print("", file=sys.stderr)
+        print("--- 今回の解析（API利用）---", file=sys.stderr)
+        print(f"  入力トークン: {total_prompt:,} / 出力トークン: {total_completion:,} / 合計: {total_prompt + total_completion:,}", file=sys.stderr)
+        print(f"  概算コスト: ${cost_usd:.4f} USD（モデル: {args.model}）", file=sys.stderr)
         return 0
 
     return 0

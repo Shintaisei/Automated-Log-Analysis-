@@ -112,6 +112,7 @@ def main() -> int:
     cols = ["code", "Technique", "Test name", "Attak cmd", "LineNo in file", "TimeStamp",
             "Rule Title", "Level", "Links", "Channel", "EventID", "msg", "ExtraFieldInfo", "Computer", "RecordID"]
 
+    out_path.parent.mkdir(parents=True, exist_ok=True)
     with open(out_path, "w", encoding="utf-8-sig", newline="") as f:
         w = csv.DictWriter(f, fieldnames=cols, delimiter="\t", extrasaction="ignore")
         w.writeheader()

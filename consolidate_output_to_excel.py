@@ -6,6 +6,10 @@ data/output 内の各フォルダにあるTSVを集約し、1つのExcelにま�
 - 同一行（LineNo in file が同じ）は1行にまとめる
 - 重複時は「一番先に出現したファイル」の検索ワード（code）を優先
 - レポート.md は対象外。*.tsv のみ処理
+
+使い方:
+  python consolidate_output_to_excel.py              # 全フォルダを集約
+  python consolidate_output_to_excel.py --only T1572 # T1572 で始まるフォルダだけ集約
 """
 
 import csv
@@ -69,6 +73,16 @@ def merge_tsvs_in_folder(folder: Path) -> tuple[list[dict], list[str]]:
 
 
 def main() -> int:
+    import argparse
+    ap = argparse.ArgumentParser(description="data/output 内のTSVを1つのExcelに集約")
+    ap.add_argument(
+        "--only", "-o",
+        metavar="PREFIX",
+        default=None,
+        help="このプレフィックスで始まるフォルダだけ集約（例: --only T1572）",
+    )
+    args = ap.parse_args()
+
     base_dir = Path(__file__).resolve().parent
     output_root = base_dir / "data" / "output"
 
@@ -76,13 +90,20 @@ def main() -> int:
         print(f"エラー: {output_root} が存在しません。", file=sys.stderr)
         return 1
 
-    # サブフォルダのみ（TSVが入っているフォルダ）
-    folders = sorted(
+    # サブフォルダのみ（TSVが入っているフォルダ）。--only のときはプレフィックスで絞る
+    folders = [
         p for p in output_root.iterdir()
         if p.is_dir() and not p.name.startswith(".")
-    )
+    ]
+    if args.only:
+        prefix = args.only.strip()
+        folders = [p for p in folders if p.name.startswith(prefix)]
+    folders = sorted(folders)
     if not folders:
-        print(f"エラー: {output_root} にサブフォルダがありません。", file=sys.stderr)
+        if args.only:
+            print(f"エラー: {output_root} に「{args.only}」で始まるフォルダがありません。", file=sys.stderr)
+        else:
+            print(f"エラー: {output_root} にサブフォルダがありません。", file=sys.stderr)
         return 1
 
     try:
@@ -119,6 +140,9 @@ def main() -> int:
         merged, columns = merge_tsvs_in_folder(folder)
         if not columns:
             print(f"  スキップ（TSVなし）: {folder.name}", file=sys.stderr)
+            continue
+        if len(merged) == 0:
+            print(f"  スキップ（ログ0件）: {folder.name}", file=sys.stderr)
             continue
 
         sheet_name = sanitize_sheet_name(folder.name)
